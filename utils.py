@@ -7,7 +7,7 @@ def get_openai_client():
 def generate_food_recommendation(prompt: str) -> str:
     client = get_openai_client()
     response = client.chat.completions.create(
-        model="gpt-5-mini",
+        model="gpt-5-nano",
         messages=[
             {"role": "system", "content": "You are a helpful assistant that provides food recommendations based on the user selected vegetables and ingredients."},
             {"role": "user", "content": prompt}

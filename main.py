@@ -1,102 +1,116 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from fastapi import FastAPI, Depends, HTTPException, status
 from typing import List 
-from schemas import UserCreate, User, Login
-import schemas
-from db import init_db, get_user_by_id, get_conversation_history, create_user, delete_conversation_history, create_conversation, delete_user, update_last_login, update_user_email, update_user_password, update_username
-from fastapi import FastAPI, HTTPException
-from sqlalchemy.orm import SessionW
+from sqlalchemy.orm import Session
+from datetime import timedelta
+from schemas import UserCreate, User, UserLogin, Token, Conversation, ConversationCreate
+from db import init_db, get_conversation_history, delete_conversation_history, create_conversation, delete_user, update_last_login, update_user_email, update_user_password, update_username
+from db import User as UserModel
+from auth import create_access_token, get_current_user, SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 import uvicorn
+from utils import generate_food_recommendation
 
+app = FastAPI(title="AI Food Recipes Backend APIs", version="1.0")
 
+SessionLocal = init_db() 
 
-app = FastAPI(app_name="AI Food Recipes Backend APIs", version="1.0")
-db = init_db()
+if not SessionLocal:
+    raise Exception("Database connection failed")
 
-@app.post("/users/", response_model=User)
-def create_user(user: UserCreate):
-    db_user = db.query(schemas.User).filter(schemas.User.email == user.email).first()
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Authentication endpoints
+@app.post("/login", response_model=Token)
+def login(user_login: UserLogin, db: Session = Depends(get_db)):
+    # Authenticate user
+    db_user = db.query(UserModel).filter(UserModel.email == user_login.email).first()
+    if not db_user or db_user.hashed_password != user_login.password + "notreallyhashed":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+        )
+    
+    # Update last login
+    update_last_login(db, db_user.id)
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"user_id": db_user.id, "email": db_user.email},
+        expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/register", response_model=User)
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(UserModel).filter(UserModel.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
+    
     fake_hashed_password = user.password + "notreallyhashed"
-    new_user = schemas.User(username=user.username, email=user.email, hashed_password=fake_hashed_password)
+    new_user = UserModel(
+        username=user.username, 
+        email=user.email, 
+        hashed_password=fake_hashed_password
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+    
     return new_user
 
+# Protected endpoints (require authentication)
+@app.get("/users/me", response_model=User)
+def read_current_user(current_user: User = Depends(get_current_user)):
+    return current_user
 
-@app.get("/users/{user_id}", response_model=User)
-def read_user(user_id: int):
-    db_user = get_user_by_id(db, user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return db_user
-
-@app.delete("/users/{user_id}")
-def delete_user_endpoint(user_id: int):
-    db_user = get_user_by_id(db, user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    delete_user(db, user_id)
-    return {"detail": "User deleted successfully"}
-
-@app.get("/users/{user_id}/conversations/", response_model=List[schemas.Conversation])
-def read_conversation_history(user_id: int):
-    conversations = get_conversation_history(db, user_id)
-    return conversations
-
-@app.delete("/users/{user_id}/conversations/")
-def delete_conversation_history_endpoint(user_id: int):
-    delete_conversation_history(db, user_id)
-    return {"detail": "Conversation history deleted successfully"}
-
-@app.post("/users/{user_id}/conversations/")
-def create_conversation_endpoint(user_id: int, user_message: str, bot_response: str):
-    conversation = create_conversation(db, user_id, user_message, bot_response)
-    return conversation
-
-@app.post("/users/{user_id}/auth/")
-def authenticate_user(login: Login):
-    db_user = db.query(schemas.User).filter(schemas.User.email == login.email).first()
-    if not db_user or db_user.hashed_password != login.password + "notreallyhashed":
-        raise HTTPException(status_code=400, detail="Invalid credentials")
-    update_last_login(db, db_user.id)
-    return {"detail": "Login successful"}
-
-@app.post("/users/create_user/")
-def create_user_endpoint(user: UserCreate):
-    db_user = db.query(schemas.User).filter(schemas.User.email == user.email).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    new_user = create_user(db, user)
-    return new_user
-
-@app.put("/users/{user_id}/update_email/")
-def update_email_endpoint(user_id: int, email: str):
-    db_user = get_user_by_id(db, user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    update_user_email(db, user_id, email)
+@app.put("/users/me/email")
+def update_email(new_email: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    update_user_email(db, current_user.id, new_email)
     return {"detail": "Email updated successfully"}
 
-@app.put("/users/{user_id}/update_password/")
-def update_password_endpoint(user_id: int, password: str):
-    db_user = get_user_by_id(db, user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    update_user_password(db, user_id, password)
+@app.put("/users/me/password")
+def update_password(password: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fake_hashed_password = password + "notreallyhashed"
+    update_user_password(db, current_user.id, fake_hashed_password)
     return {"detail": "Password updated successfully"}
 
-@app.put("/users/{user_id}/update_username/")
-def update_username_endpoint(user_id: int, username: str):
-    db_user = get_user_by_id(db, user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    update_username(db, user_id, username)
+@app.put("/users/me/username")
+def update_username_endpoint(username: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    update_username(db, current_user.id, username)  # Now it calls the db function
     return {"detail": "Username updated successfully"}
 
+@app.delete("/users/me")
+def delete_current_user(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    delete_user(db, current_user.id)
+    return {"detail": "User deleted successfully"}
+
+# Conversation endpoints
+@app.get("/conversations/", response_model=List[Conversation])
+def read_conversation_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    conversations = get_conversation_history(db, current_user.id)
+    return conversations
+
+@app.post("/conversations/")
+def create_conversation(conversation: ConversationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    new_conversation = create_conversation(db, current_user.id, conversation.user_message, conversation.bot_response)
+    return new_conversation
+
+@app.post("/conversations/generate/")
+def generate_recommendation(ingredients: str, current_user: User = Depends(get_current_user)):
+    prompt = f"Based on the following ingredients: {ingredients}, please provide a food recommendation."
+    recommendation = generate_food_recommendation(prompt)
+    return {"recommendation": recommendation}
+
+@app.delete("/conversations/")
+def delete_conversation_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    delete_conversation_history(db, current_user.id)
+    return {"detail": "Conversation history deleted successfully"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True, log_level="info")

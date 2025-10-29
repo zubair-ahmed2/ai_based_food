@@ -4,7 +4,7 @@ from sqlalchemy import Column, Integer, String, Text
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 from config import DATABASE_URL
-
+import os
 
 
 Base = declarative_base()
